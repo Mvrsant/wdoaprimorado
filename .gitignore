@@ -1,0 +1,19 @@
+# Credenciais — NUNCA versionar
+service_account.json
+*.json
+!package.json
+
+# Excel temporário baixado pelo fallback do GitHub
+ddeprofit.xlsx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
