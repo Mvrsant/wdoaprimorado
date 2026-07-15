@@ -128,6 +128,10 @@ TZ             = ZoneInfo("America/Sao_Paulo")
 # Horário de fechamento do WDO (ajustar se necessário)
 HORA_FECHAMENTO_WDO = dtime(18, 30)
 
+# Horário usado para "travar" a variação do DXY no cálculo da abertura/bandas
+HORA_DXY_CALCULO   = 8
+MINUTO_DXY_CALCULO = 50
+
 # ── Google Sheets (planilha-ponte alimentada pelo sync_dde.py) ──
 # Preencher com os valores reais (ver SETUP_GOOGLE_SHEETS.md)
 GOOGLE_SHEET_ID  = "1x79rVbOFTjFRIlCNDoBc4LcvvDaKJU4y0yWLiDEwxXQ"
@@ -211,6 +215,7 @@ def buscar_yfinance(ticker: str, period: str = "5d") -> dict | None:
 
 @st.cache_data(ttl=TTL_PADRAO, show_spinner=False)
 def buscar_variacao_dxy() -> float | None:
+    """Variação % do DXY 'atual' (último fechamento vs. fechamento anterior) — apenas para acompanhamento."""
     try:
         hist = yf.Ticker(TICKERS["dxy"]).history(period="5d")
         if len(hist) < 2:
@@ -221,6 +226,54 @@ def buscar_variacao_dxy() -> float | None:
     except Exception as e:
         st.warning(f"DXY variação: {e}")
         return None
+
+
+@st.cache_data(ttl=TTL_PADRAO, show_spinner=False)
+def buscar_variacao_dxy_horario(hora: int = 8, minuto: int = 50) -> dict | None:
+    """
+    Variação % do DXY no horário informado (padrão 08:50 BRT) em relação
+    ao fechamento do pregão anterior. Esta é a variação usada no cálculo
+    da abertura estimada do WDO e das bandas.
+    """
+    try:
+        ticker = yf.Ticker(TICKERS["dxy"])
+
+        diario = ticker.history(period="5d", interval="1d")
+        if len(diario) < 2:
+            return None
+        fechamento_anterior = diario["Close"].iloc[-2]
+
+        intraday = ticker.history(period="2d", interval="1m")
+        if intraday.empty:
+            return None
+        intraday.index = intraday.index.tz_convert(TZ)
+
+        hoje = agora_br().date()
+        alvo = datetime.combine(hoje, dtime(hora, minuto), tzinfo=TZ)
+
+        candles_ate_alvo = intraday.loc[
+            (intraday.index.date == hoje) & (intraday.index <= alvo)
+        ]
+        if candles_ate_alvo.empty:
+            return None
+
+        preco_no_horario = candles_ate_alvo["Close"].iloc[-1]
+        horario_real = candles_ate_alvo.index[-1]
+
+        variacao = round(
+            ((preco_no_horario - fechamento_anterior) / fechamento_anterior) * 100, 4
+        )
+
+        return {
+            "preco":               round(preco_no_horario, 4),
+            "fechamento_anterior": round(fechamento_anterior, 4),
+            "variacao_pct":        variacao,
+            "horario_utilizado":   horario_real.strftime("%d/%m/%Y %H:%M"),
+        }
+    except Exception as e:
+        st.warning(f"DXY variação às {hora:02d}:{minuto:02d}: {e}")
+        return None
+
 
 @st.cache_data(ttl=TTL_PADRAO, show_spinner=False)
 def buscar_ouro_brl() -> float | None:
@@ -552,7 +605,11 @@ with st.spinner("Buscando dados..."):
     xauusd_d   = buscar_yfinance(TICKERS["xauusd"])
     xauusd     = xauusd_d["close"] if xauusd_d else None
     ouro_brl   = buscar_ouro_brl()
-    dxy_var    = buscar_variacao_dxy()
+
+    dxy_var      = buscar_variacao_dxy()                                        # variação atual (acompanhamento)
+    dxy_850_dict = buscar_variacao_dxy_horario(HORA_DXY_CALCULO, MINUTO_DXY_CALCULO)  # variação fixada às 08:50 (usada no cálculo)
+    dxy_var_850  = dxy_850_dict["variacao_pct"] if dxy_850_dict else None
+
     cme_d      = buscar_yfinance(TICKERS["cme"])
     brlusd_d   = buscar_yfinance(TICKERS["brl_usd"])
     ptax_cots  = buscar_ptax()
@@ -564,7 +621,11 @@ di1_fut    = planilha.get("di1_fut")   if planilha else None
 du         = planilha.get("business_days_remaining") if planilha else None
 venc_str   = planilha.get("expiration_date") if planilha else "—"
 
-wdo_abertura  = calc_abertura_wdo(wdo_fut, dxy_var)
+# Fallback: se ainda não houver candle das 08:50 hoje (ex: antes desse horário,
+# fim de semana ou feriado), usa a variação atual pra não travar o cálculo.
+dxy_var_para_calculo = dxy_var_850 if dxy_var_850 is not None else dxy_var
+
+wdo_abertura  = calc_abertura_wdo(wdo_fut, dxy_var_para_calculo)
 over          = calc_over(di1_fut, du)
 preco_justo   = calc_preco_justo(dolar_spot, over)
 paridade_ouro = calc_paridade_ouro(xauusd, ouro_brl)
@@ -593,7 +654,7 @@ with st.expander("📡 Status dos dados — " + horario, expanded=False):
 
     c2.markdown(f"**Delta50 Vol B3** {status_badge(sup_volb3 is not None)}", unsafe_allow_html=True)
     c3.markdown(f"**Ouro BRL** {status_badge(ouro_brl is not None)}", unsafe_allow_html=True)
-    c4.markdown(f"**DXY** {status_badge(dxy_var is not None)}", unsafe_allow_html=True)
+    c4.markdown(f"**DXY (8:50)** {status_badge(dxy_var_850 is not None)}", unsafe_allow_html=True)
     ptax_ok = any(p is not None for p in ptax_cots)
     c5.markdown(f"**PTAX** {status_badge(ptax_ok)}", unsafe_allow_html=True)
 
@@ -613,12 +674,20 @@ aba1, aba2, aba3, aba4, aba5 = st.tabs([
 # ══════════════════════════════════════════════
 with aba1:
     st.markdown("#### Métricas principais")
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Abertura Est.",  fmt(wdo_abertura, 2),
               delta=fmt(wdo_abertura - wdo_fut, 2) if wdo_abertura and wdo_fut else None)
     m2.metric("Preço Justo",    fmt(preco_justo, 4))
     m3.metric("Paridade Ouro",  fmt(paridade_ouro, 4))
-    m4.metric("Variação DXY",   f"{fmt(dxy_var, 2)}%" if dxy_var else "—")
+    m4.metric(
+        "DXY (8:50)",
+        f"{fmt(dxy_var_850, 2)}%" if dxy_var_850 is not None else "—",
+        help=(f"Horário usado: {dxy_850_dict['horario_utilizado']} · "
+              f"usado no cálculo da abertura/bandas") if dxy_850_dict else
+             "Ainda sem candle às 08:50 hoje — cálculo usando a variação atual como fallback",
+    )
+    m5.metric("DXY (atual)", f"{fmt(dxy_var, 2)}%" if dxy_var is not None else "—",
+              help="Apenas para acompanhamento — não entra no cálculo da abertura/bandas")
 
     st.markdown("<hr style='border-color:#30363d'>", unsafe_allow_html=True)
 
@@ -660,6 +729,11 @@ with aba1:
 with aba2:
     st.metric("Abertura WDO estimada", fmt(wdo_abertura, 2),
               delta=fmt(wdo_abertura - wdo_fut, 2) if wdo_abertura and wdo_fut else None)
+    st.caption(
+        f"Calculada com a variação do DXY às {HORA_DXY_CALCULO:02d}:{MINUTO_DXY_CALCULO:02d} "
+        f"({fmt(dxy_var_850, 2)}%)." if dxy_var_850 is not None else
+        "⚠️ Sem candle do DXY às 08:50 hoje ainda — usando a variação atual como fallback."
+    )
 
     st.markdown("<hr style='border-color:#30363d'>", unsafe_allow_html=True)
     st.markdown("#### Máximas e Mínimas")
@@ -790,16 +864,15 @@ with aba4:
 
     st.markdown("<hr style='border-color:#30363d'>", unsafe_allow_html=True)
     st.markdown("#### DXY — Índice do Dólar")
-    if brlusd_d:  # reaproveita cache — evita 2ª chamada idêntica a buscar_yfinance(dxy)
-        pass
     dxy_d = buscar_yfinance(TICKERS["dxy"])
     if dxy_d:
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Abertura",   fmt(dxy_d["open"],  3))
-        c2.metric("Máxima",     fmt(dxy_d["high"],  3))
-        c3.metric("Mínima",     fmt(dxy_d["low"],   3))
-        c4.metric("Fechamento", fmt(dxy_d["close"], 3))
-        c5.metric("Variação",   f"{fmt(dxy_var, 2)}%" if dxy_var else "—")
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("Abertura",         fmt(dxy_d["open"],  3))
+        c2.metric("Máxima",           fmt(dxy_d["high"],  3))
+        c3.metric("Mínima",           fmt(dxy_d["low"],   3))
+        c4.metric("Fechamento",       fmt(dxy_d["close"], 3))
+        c5.metric("Variação (atual)", f"{fmt(dxy_var, 2)}%" if dxy_var is not None else "—")
+        c6.metric("Variação (8:50)",  f"{fmt(dxy_var_850, 2)}%" if dxy_var_850 is not None else "—")
     else:
         st.warning("Dados DXY não disponíveis.")
 
@@ -817,7 +890,7 @@ with aba5:
             m_spot   = st.number_input("Dólar Spot",                value=float(dolar_spot or 0), format="%.4f")
             m_di1    = st.number_input("DI1 Futuro (taxa a.a.)",    value=float(di1_fut or 0), format="%.5f")
         with c2:
-            m_dxy    = st.number_input("Variação DXY (%)",          value=float(dxy_var or 0), format="%.4f")
+            m_dxy    = st.number_input("Variação DXY (%) — 08:50",  value=float(dxy_var_para_calculo or 0), format="%.4f")
             m_du     = st.number_input("Dias Úteis até Vencimento", value=int(du or 0), step=1)
             m_sup    = st.number_input("Delta 50 Vol B3",           value=float(sup_volb3 or 0), format="%.4f")
         submitted = st.form_submit_button("Recalcular com valores manuais", width="stretch")
