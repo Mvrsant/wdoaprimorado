@@ -97,7 +97,7 @@ table.wdo-table tbody td {
     background-color: #0d1117 !important;
     color: #e6edf3 !important;
     font-family: 'JetBrains Mono', monospace !important;
-    font-size: 20px !important;
+    font-size: 15px !important;
     font-weight: 600 !important;
     text-transform: uppercase;
     letter-spacing: 0.3px;
