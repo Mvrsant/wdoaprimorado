@@ -83,21 +83,24 @@ table.wdo-table thead th {
     color: #8b949e !important;
     font-weight: 600 !important;
     text-align: left !important;
-    padding: 10px 16px !important;
+    padding: 14px 16px !important;
     border-bottom: 1px solid #30363d !important;
-    font-size: 13 px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 13px !important;
     text-transform: uppercase;
     letter-spacing: 0.6px;
     white-space: nowrap;
 }
 table.wdo-table tbody td {
-    padding: 13px 16px !important;
+    padding: 14px 16px !important;
     border-bottom: 1px solid #21262d !important;
     background-color: #0d1117 !important;
     color: #e6edf3 !important;
-    font-size: 20 px !important;
-    font-weight:600 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 20px !important;
+    font-weight: 600 !important;
     text-transform: uppercase;
+    letter-spacing: 0.3px;
     white-space: nowrap;
 }
 table.wdo-table tbody td.num {
@@ -616,14 +619,43 @@ def status_badge(ok: bool):
 def status_badge_warn(texto: str):
     return f'<span class="tag-warn">{texto}</span>'
 
-def colorir_bandas(df: pd.DataFrame) -> pd.DataFrame.style:
-    def row_color(row):
-        if "Máxima" in str(row["Tipo"]):
-            return ["background-color:#1a3a23;color:#3fb950"] * len(row)
-        elif "Mínima" in str(row["Tipo"]):
-            return ["background-color:#3d1a1a;color:#f85149"] * len(row)
-        return [""] * len(row)
-    return df.style.apply(row_color, axis=1)
+def _fmt_cel(v):
+    if isinstance(v, float):
+        return fmt(v, 2)
+    if v is None:
+        return "—"
+    return str(v)
+
+def render_table(df: pd.DataFrame, highlight_col: str | None = None) -> None:
+    """Renderiza um DataFrame como tabela HTML 100% estilizada via CSS (.wdo-table)."""
+    cols = list(df.columns)
+
+    def row_class(row):
+        if highlight_col and highlight_col in row:
+            val = str(row[highlight_col])
+            if "Máxima" in val:
+                return "row-up"
+            if "Mínima" in val:
+                return "row-down"
+        return ""
+
+    thead = "".join(f"<th>{c}</th>" for c in cols)
+    body_rows = []
+    for _, row in df.iterrows():
+        cls = row_class(row)
+        tds = []
+        for i, c in enumerate(cols):
+            css_cls = ' class="num"' if i > 0 else ""
+            tds.append(f"<td{css_cls}>{_fmt_cel(row[c])}</td>")
+        body_rows.append(f'<tr class="{cls}">{"".join(tds)}</tr>')
+
+    html = (
+        '<div class="wdo-table-wrap"><table class="wdo-table">'
+        f"<thead><tr>{thead}</tr></thead>"
+        f'<tbody>{"".join(body_rows)}</tbody>'
+        "</table></div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 # HEADER
@@ -718,7 +750,7 @@ aba1, aba2, aba3, aba4, aba5 = st.tabs([
     "📊 Visão Geral",
     "📈 Abertura & Bandas",
     "💰 PTAX & Bandas PTAX",
-    "🔗 Paridades CME/BRL",
+    "🔗 Paridades CME/FX",
     "⚙️ Ajuste Manual",
 ])
 
@@ -759,7 +791,7 @@ with aba1:
             }
             rows = [{"Descrição": labels.get(k, k), "Valor": str(v)}
                     for k, v in planilha.items() if k != "minutos_desde_sync"]
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            render_table(pd.DataFrame(rows))
         else:
             st.warning("Dados da planilha não disponíveis.")
 
@@ -801,7 +833,7 @@ with aba2:
                             round(bandas["2ª Máxima"] - wdo_abertura, 2),
                             round(bandas["2ª Mínima"] - wdo_abertura, 2)],
         })
-        st.dataframe(colorir_bandas(df_b), hide_index=True, width="stretch")
+        render_table(df_b, highlight_col="Tipo")
     else:
         st.warning("Dados insuficientes para calcular as bandas. Verifique a aba ⚙️ Ajuste Manual.")
 
@@ -853,7 +885,7 @@ with aba3:
             dados[f"PTAX {i+1} ({p['hora']})"] = [p[t] for t in tipos]
 
         df_pb = pd.DataFrame(dados)
-        st.dataframe(colorir_bandas(df_pb), hide_index=True, width="stretch")
+        render_table(df_pb, highlight_col="Tipo")
     else:
         st.warning("Dados insuficientes para as bandas PTAX. Verifique a aba ⚙️ Ajuste Manual.")
 
@@ -870,7 +902,7 @@ with aba4:
     col_cme, col_brl = st.columns(2)
 
     with col_cme:
-        st.markdown("#### CME — 6L=F")
+        st.markdown("#### CME — BRL Futuro")
         if cme_d:
             cme_open_brl  = cme_to_brl(cme_d["open"])
             cme_high_brl  = cme_to_brl(cme_d["low"])
@@ -886,14 +918,14 @@ with aba4:
                 "BRL pts":      [fmt(cme_open_brl,2), fmt(cme_high_brl,2),
                                  fmt(cme_low_brl,2),   fmt(cme_close_brl,2), fmt(cme_prev_brl,2)],
             })
-            st.dataframe(df_cme, hide_index=True, width="stretch")
+            render_table(df_cme)
             st.metric("Δ Fechamento", fmt(delta_cme, 2) if delta_cme else "—",
                       delta=fmt(delta_cme, 2) if delta_cme else None)
         else:
             st.warning("Dados CME não disponíveis.")
 
     with col_brl:
-        st.markdown("#### USD/BRL")
+        st.markdown("#### USD/BRL SPOT")
         if brlusd_d:
             usd_open  = inv(brlusd_d["open"])
             usd_high  = inv(brlusd_d["low"])
@@ -909,7 +941,7 @@ with aba4:
                 "USD/BRL": [fmt(usd_open,4), fmt(usd_high,4),
                             fmt(usd_low,4),  fmt(usd_close,4), fmt(usd_prev,4)],
             })
-            st.dataframe(df_brl, hide_index=True, width="stretch")
+            render_table(df_brl)
             st.metric("Δ Fechamento", fmt(delta_usd, 4) if delta_usd else "—",
                       delta=fmt(delta_usd, 4) if delta_usd else None)
         else:
@@ -966,7 +998,7 @@ with aba5:
                 "Valor (pts)": [m_bandas["1ª Máxima"], m_bandas["1ª Mínima"],
                                 m_bandas["2ª Máxima"], m_bandas["2ª Mínima"]],
             })
-            st.dataframe(colorir_bandas(df_mb), hide_index=True, width="stretch")
+            render_table(df_mb, highlight_col="Tipo")
 
 # ─────────────────────────────────────────────
 # RODAPÉ
