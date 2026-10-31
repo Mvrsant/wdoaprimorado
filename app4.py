@@ -542,7 +542,6 @@ def buscar_ptax() -> list:
     except Exception as e:
         st.warning(f"PTAX: {e}")
         return [None] * 4
-
 # ─────────────────────────────────────────────
 # Funções de cálculo (não alteradas — over já validado)
 # ─────────────────────────────────────────────
