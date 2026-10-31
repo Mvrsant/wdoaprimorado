@@ -408,7 +408,7 @@ def buscar_ptax() -> list:
         data_c   = datetime.today().date()
 
         for _ in range(7):
-            s   = data_c.strftime("%m.%d.%Y")
+            s   = data_c.strftime("%m-%d-%Y")
             df  = (endpoint.query()
                    .parameters(moeda="USD", dataInicial=s, dataFinalCotacao=s)
                    .collect())
