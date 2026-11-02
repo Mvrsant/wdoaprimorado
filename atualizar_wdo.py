@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import gspread
 import requests
@@ -10,12 +11,11 @@ from zoneinfo import ZoneInfo
 from bcb import PTAX as BCB_PTAX
 
 # ─────────────────────────────────────────────────────────────
-# CONFIGURAÇÕES DA PLANILHA GOOGLE
+# CONFIGURAÇÕES E IDs
 # ─────────────────────────────────────────────────────────────
-# ID da sua planilha: calculos WDO
-SPREADSHEET_ID = "1RjX2XNB84PUJmQN8IZYxbh-at5eF_FpcTii_K5NLsxM"
-TAB_NAME = "Planilha1"
-CREDS_JSON = "credentials.json"  # Arquivo de Conta de Serviço do Google Cloud
+SHEET_DESTINO_ID = "1RjX2XNB84PUJmQN8IZYxbh-at5eF_FpcTii_K5NLsxM"   # calculos WDO
+SHEET_PONTE_ID   = "1x79rVbOFTjFRIlCNDoBc4LcvvDaKJU4y0yWLiDEwxXQ"   # temporealdde
+TAB_DESTINO_NOME = "Planilha1"
 
 TZ = ZoneInfo("America/Sao_Paulo")
 HORA_FECHAMENTO_WDO = dtime(18, 30)
@@ -34,9 +34,6 @@ URL_VOL_B3 = (
 )
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# ─────────────────────────────────────────────────────────────
-# FUNÇÕES DE COLETA DE DADOS (REAPROVEITADAS DA SUA ROTINA)
-# ─────────────────────────────────────────────────────────────
 def agora_br():
     return datetime.now(tz=TZ)
 
@@ -96,13 +93,12 @@ def buscar_delta50_b3(venc_dt):
         venc_ref = f"{MESES_ABREV[venc_dt.month]}-{str(venc_dt.year)[2:]}"
         r = requests.get(URL_VOL_B3, headers=HEADERS, timeout=15)
         tabelas = pd.read_html(io.StringIO(r.text), decimal=",", thousands=".")
-        if not tabelas:
-            return None
-        df = tabelas[0]
-        df.columns = [str(c).strip() for c in df.columns]
-        linha = df[df[df.columns[0]].astype(str).str.strip().str.lower() == venc_ref.lower()]
-        if not linha.empty and "50" in df.columns:
-            return float(linha["50"].values[0])
+        if tabelas:
+            df = tabelas[0]
+            df.columns = [str(c).strip() for c in df.columns]
+            linha = df[df[df.columns[0]].astype(str).str.strip().str.lower() == venc_ref.lower()]
+            if not linha.empty and "50" in df.columns:
+                return float(linha["50"].values[0])
     except Exception as e:
         print(f"Erro Vol B3: {e}")
     return None
@@ -135,19 +131,56 @@ def buscar_ptax():
         print(f"Erro PTAX: {e}")
         return [None] * 4
 
-# ─────────────────────────────────────────────────────────────
-# SINCRONIZAÇÃO COM O GOOGLE SHEETS
-# ─────────────────────────────────────────────────────────────
-def atualizar_painel():
-    print(f"[{agora_br().strftime('%H:%M:%S')}] Coletando dados de mercado...")
+def parse_num(v):
+    if v is None:
+        return None
+    s = str(v).strip().replace("%", "")
+    if not s or s.lower() == "nan":
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    try:
+        return float(s.replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
 
-    # 1. Calendário e Vencimentos
+def main():
+    print(f"[{agora_br().strftime('%H:%M:%S')}] Iniciando execução no GitHub Actions...")
+
+    # Autenticação Google via Secret do GitHub
+    creds_json = os.environ.get("GCP_SA_KEY")
+    if creds_json:
+        creds_dict = json.loads(creds_json)
+        gc = gspread.service_account_from_dict(creds_dict)
+    else:
+        gc = gspread.service_account(filename="credentials.json")
+
+    # 1. Leitura da planilha-ponte (dados do DDE)
+    wdo_fut, dolar_spot, di1_fut, frp0 = None, None, None, None
+    try:
+        sh_ponte = gc.open_by_key(SHEET_PONTE_ID)
+        ws_ponte = sh_ponte.sheet1
+        linha_dde = ws_ponte.row_values(2)
+        if len(linha_dde) >= 7:
+            usar_ultimo = apos_fechamento_wdo()
+            wdo_fut = parse_num(linha_dde[1] if usar_ultimo else linha_dde[2])
+            dolar_spot = parse_num(linha_dde[3] if usar_ultimo else linha_dde[4])
+            di1_fut = parse_num(linha_dde[5])
+            if di1_fut and di1_fut > 1:
+                di1_fut = di1_fut / 100
+            frp0 = parse_num(linha_dde[6])
+            print(f"DDE lido com sucesso: WDO={wdo_fut}, Spot={dolar_spot}, DI1={di1_fut}, FRP0={frp0}")
+    except Exception as e:
+        print(f"Aviso ao ler planilha ponte: {e}")
+
+    # 2. Busca de dados externos
     hoje = datetime.today()
     venc_dt = calcular_vencimento_wdo(hoje)
     du = len(pd.bdate_range(start=hoje, end=venc_dt))
     venc_str = venc_dt.strftime("%d/%m/%Y")
 
-    # 2. Cotações Globais e Derivativos
     dxy_var = buscar_variacao_dxy()
     sup_volb3 = buscar_delta50_b3(venc_dt)
     cme_d = buscar_yfinance(TICKERS["cme"])
@@ -156,31 +189,13 @@ def atualizar_painel():
     ouro_brl = buscar_ouro_brl()
     ptax_cots = buscar_ptax()
 
-    # 3. Conexão com a planilha Google
-    gc = gspread.service_account(filename=CREDS_JSON)
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    ws = sh.worksheet(TAB_NAME)
-
-    # Lendo dados do DDE (se você já envia para a aba 'sync_dde')
-    try:
-        ws_dde = sh.worksheet("sync_dde")
-        dde_row = ws_dde.row_values(2)
-        # Ex: WDOFUT_fech_anterior (col C), USDBRL_fech_anterior (col E), DI1 (col F), FRP0 (col G)
-        usar_ultimo = apos_fechamento_wdo()
-        wdo_fut = float(dde_row[1].replace(".", "").replace(",", ".")) if usar_ultimo else float(dde_row[2].replace(".", "").replace(",", "."))
-        dolar_spot = float(dde_row[3].replace(",", ".")) if usar_ultimo else float(dde_row[4].replace(",", "."))
-        di1_fut = float(dde_row[5].replace("%", "").replace(",", ".")) / 100
-        frp0 = float(dde_row[6].replace(",", "."))
-    except Exception as e:
-        print(f"Aviso ao ler sync_dde (usando valores da tela): {e}")
-        wdo_fut = None
-        dolar_spot = None
-        di1_fut = None
-        frp0 = None
+    # 3. Atualização da Planilha1 (calculos WDO)
+    sh_dest = gc.open_by_key(SHEET_DESTINO_ID)
+    ws_dest = sh_dest.worksheet(TAB_DESTINO_NOME)
 
     updates = []
 
-    # ── Atualiza Parâmetros (B4:B11) ──
+    # Inputs Mercado (B4:B11)
     if wdo_fut is not None:
         updates.append({"range": "B4", "values": [[wdo_fut]]})
     if dxy_var is not None:
@@ -196,7 +211,7 @@ def atualizar_painel():
         updates.append({"range": "B10", "values": [[frp0]]})
     updates.append({"range": "B11", "values": [[venc_str]]})
 
-    # ── Atualiza CME (K5:K8) ──
+    # CME (K5:K8)
     if cme_d:
         updates.append({
             "range": "K5:K8",
@@ -208,7 +223,7 @@ def atualizar_painel():
             ]
         })
 
-    # ── Atualiza Spot BRLUSD (L13:L16) ──
+    # Spot BRL/USD (L13:L16)
     if brlusd_d:
         updates.append({
             "range": "L13:L16",
@@ -220,24 +235,24 @@ def atualizar_painel():
             ]
         })
 
-    # ── Atualiza Ouro (J13 e J15) ──
+    # Ouro Spot (J13 e J15)
     if xauusd_d:
         updates.append({"range": "J13", "values": [[xauusd_d["close"]]]})
     if ouro_brl:
         updates.append({"range": "J15", "values": [[ouro_brl]]})
 
-    # ── Atualiza Janelas PTAX (B15:C18) ──
-    ptax_valores = []
+    # Janelas PTAX (B15:C18)
+    ptax_linhas = []
     for p in ptax_cots:
         if p:
-            ptax_valores.append([p["hora"], p["valor"]])
+            ptax_linhas.append([p["hora"], p["valor"]])
         else:
-            ptax_valores.append(["", ""])
-    updates.append({"range": "B15:C18", "values": ptax_valores})
+            ptax_linhas.append(["", ""])
+    updates.append({"range": "B15:C18", "values": ptax_linhas})
 
-    # Executa a escrita em lote de uma só vez
-    ws.batch_update(updates, value_input_option="USER_ENTERED")
-    print(f"[{agora_br().strftime('%H:%M:%S')}] Planilha atualizada com sucesso!")
+    # Gravação em lote
+    ws_dest.batch_update(updates, value_input_option="USER_ENTERED")
+    print(f"[{agora_br().strftime('%H:%M:%S')}] Sucesso! Painel calculos WDO atualizado.")
 
 if __name__ == "__main__":
-    atualizar_painel( )
+    main()
