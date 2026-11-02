@@ -27,7 +27,7 @@ jobs:
 
       - name: Instalar Dependências
         run: |
-          pip install gspread pandas yfinance requests beautifulsoup4 bcb lxml
+          pip install gspread pandas yfinance requests beautifulsoup4 python-bcb lxml
 
       - name: Executar Atualização da Planilha
         env:
